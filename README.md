@@ -106,6 +106,20 @@ Two ROOT files per simulation batch:
 | `mc_0.root` | MC truth: PDG, energy, momentum, vertex, parent_id, hits per particle | one row per MC particle |
 | `hits_0.root` | Raw hits: plane, drift, channel, ADC, mc_id of the producing particle | one row per **event instance** (jagged arrays inside) |
 
+## Data
+
+The `.root` files (hit and MC files) are not included in this repository
+due to GitHub's 100 MB file size limit.
+
+Download them from CERNBox:
+https://cernbox.cern.ch/s/KHco7F42uW2XDWP
+
+The folder contains multiple hit and MC files along with
+`atmos_project_script.ipynb`, which documents the structure of these files.
+
+Place the downloaded `.root` files in the project root directory before
+running the notebooks.
+
 ### 2.1 The instance / template structure
 
 The data has a structure that is not obvious at first and **does
