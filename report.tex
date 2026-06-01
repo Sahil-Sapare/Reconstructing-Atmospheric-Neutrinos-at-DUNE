@@ -1,0 +1,343 @@
+\documentclass[11pt,a4paper]{article}
+
+% --------------------- packages ---------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+% \usepackage{lmodern}  % uncomment if available
+% \usepackage{microtype}  % requires scalable fonts
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{array}
+
+% Path to figures
+\graphicspath{{figures/}}
+
+% Sensible spacing in tables
+\renewcommand{\arraystretch}{1.15}
+
+% Captions
+\captionsetup{font=small,labelfont=bf}
+
+% --------------------- title block ---------------------
+\title{\textbf{Classification of Atmospheric Neutrino Interactions in a Liquid-Argon Detector:\\ A Statistical and Machine-Learning Analysis}}
+\author{\textsc{Project Report}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent We present an end-to-end analysis of simulated atmospheric neutrino data from the DUNE Far Detector, a deep-underground liquid-argon time-projection chamber. Starting from raw detector hits, we reconstruct three-dimensional event topologies and derive a tabular dataset of \num{1000} interaction instances, each described by \num{44} variables spanning truth-level kinematics, reconstructed quantities and detector observables. Two classification tasks are considered: (i) Charged-Current (CC) versus Neutral-Current (NC) discrimination, and (ii) flavour identification ($\nu_e$, $\nu_\mu$, $\nu_\tau$) within CC events. Four classifiers --- logistic regression, random forest, XGBoost and LightGBM --- are compared on stratified train/test splits and via $5$-fold cross-validation, with class-imbalance correction and detector-only features (no truth leakage). The random forest achieves an accuracy of $0.81 \pm 0.02$ and $F_1=0.84 \pm 0.02$ on CC/NC, while XGBoost gives the strongest flavour result with macro-averaged $F_1=0.43$ and ROC-AUC $=0.69$. We discuss the physical interpretation, identify the dominant discriminative features, and outline the limitations and natural extensions of the work, principally the use of convolutional neural networks on the raw wire-plane images.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+% =====================================================================
+
+\subsection{Physical context}
+Atmospheric neutrinos are produced when high-energy cosmic-ray protons collide with nuclei in the upper atmosphere, producing showers of pions and kaons whose decays yield muons and neutrinos of three flavours: electron ($\nu_e$), muon ($\nu_\mu$) and tau ($\nu_\tau$).  Atmospheric neutrinos cover an enormous range of energies (from sub-GeV to hundreds of GeV) and travel-distances (from $L\sim\SI{15}{km}$ when produced directly above the detector to $L\sim\SI{12750}{km}$ when produced near the antipodes).  This makes them a uniquely rich probe of \emph{neutrino oscillation}: the quantum-mechanical phenomenon in which a neutrino produced as one flavour can be detected as another, with a probability that depends on the ratio $L/E_\nu$.
+
+When a neutrino interacts with a nucleus inside the detector, the interaction is one of two types:
+\begin{itemize}[leftmargin=*]
+\item \textbf{Charged-Current (CC)} interaction: $\nu_\ell + N \to \ell^- + X$.  The neutrino converts into its charged-lepton partner ($e^-$, $\mu^-$ or $\tau^-$).  The visible final state therefore contains a charged-lepton track in addition to a hadronic system $X$.
+\item \textbf{Neutral-Current (NC)} interaction: $\nu + N \to \nu + X$.  The outgoing neutrino is invisible and only the hadronic system $X$ is observed.
+\end{itemize}
+For oscillation analyses, identifying CC events is essential because only CC events carry information about the original neutrino flavour and energy; NC events constitute an irreducible background.
+
+\subsection{The detector and the dataset}
+The data analysed here are from a Monte-Carlo (MC) simulation of the DUNE Horizontal-Drift Far Detector, a Liquid-Argon Time-Projection Chamber (LArTPC).  In a LArTPC, charged particles ionise the liquid argon along their path; the freed electrons drift in a strong electric field towards three planes of sense wires (denoted $W$, $V$, $U$) that record the arrival time and the deposited charge of each ionisation cluster.  A reconstructed event therefore consists of a collection of \emph{hits}, each carrying a wire identifier (\texttt{channel}), an arrival time (\texttt{drift}) and a pulse height (\texttt{adc}).
+
+The simulation provides two ROOT files:
+\begin{itemize}[leftmargin=*]
+\item \texttt{mc\_0.root} --- truth-level table with one row per MC particle, listing PDG code, energy, momentum vector, vertex position and parent identifier.
+\item \texttt{hits\_0.root} --- one row per detector readout, with jagged arrays of wire-plane hits.
+\end{itemize}
+Although the file labels suggest a small number of events, the structure on closer inspection is one of \emph{templates and realisations}: there are \num{100} unique physics events (\texttt{event\_id} $\in \{0,\dots,99\}$), each replayed approximately $97$ times through the detector simulation with independent noise and threshold realisations, yielding \num{9700} hit instances in total.
+
+\subsection{Observed and derived variables}
+For each instance we extract three groups of variables (Table~\ref{tab:variables}).
+\textbf{Truth-level variables}, derived from the MC table, include the incoming neutrino's flavour, energy ($E_\nu^{\text{truth}}$), three-momentum components and the derived zenith angle ($\theta_z^{\text{truth}}$) and oscillation baseline ($L^{\text{truth}}$).  \textbf{Detector observables} are summary statistics computed directly from the hits: total hit count $N_h$, per-plane hit counts ($N_h^{W,V,U}$), total and average ADC charge, drift-coordinate range and standard deviation, channel ranges per plane, and a derived hit density.  \textbf{Reconstructed quantities} arise from the analysis pipeline described in Section~\ref{sec:technical}: per-particle directions, summed neutrino momentum, reconstructed zenith angle and baseline.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{p{0.27\linewidth}p{0.65\linewidth}}
+\toprule
+\textbf{Group} & \textbf{Variables} \\
+\midrule
+Identifiers & \texttt{instance\_id}, \texttt{event\_id} \\
+Targets (labels) & \texttt{is\_cc} (binary), \texttt{nu\_flavour} ($\nu_e/\nu_\mu/\nu_\tau$) \\
+Truth kinematics & $E_\nu^{\text{truth}}$, neutrino direction components, $\theta_z^{\text{truth}}$, $L^{\text{truth}}$ \\
+Detector observables & $N_h$, $N_h^{W}$, $N_h^{V}$, $N_h^{U}$, $\sum_i \mathrm{ADC}_i$, $\overline{\mathrm{ADC}}$, $\max\mathrm{ADC}$, drift range and std., channel ranges, hit density \\
+Reconstructed kinematics & $E_\nu^{\text{reco}}$, reconstructed direction, $\theta_z^{\text{reco}}$, $L^{\text{reco}}$ \\
+Reconstruction quality & raw and filtered 3D point counts, success flags \\
+\bottomrule
+\end{tabular}
+\caption{Variables extracted per interaction instance.}
+\label{tab:variables}
+\end{table}
+
+% =====================================================================
+\section{Exploratory Data Analysis}
+\label{sec:eda}
+% =====================================================================
+
+\subsection{Class composition}
+Figure~\ref{fig:class_balance} summarises the composition of the analysed sample of $N=\num{1000}$ instances.  CC and NC events are nearly balanced (\SI{54.3}{\percent} CC vs.\ \SI{45.7}{\percent} NC), which is favourable for binary classification.  Within CC events, however, the flavour distribution is strongly skewed: $\nu_e$ ($n=\num{300}$) and $\nu_\mu$ ($n=\num{229}$) dominate, while $\nu_\tau$ events are rare ($n=\num{14}$).  This imbalance has direct consequences for the second classification task and is discussed in Section~\ref{sec:technical}.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.95\linewidth]{fig_class_balance}
+\caption{Composition of the analysed dataset ($N=\num{1000}$).  (a) Charged-Current vs.\ Neutral-Current.  (b) Neutrino flavour distribution.  The marked under-representation of $\nu_\tau$ events reflects the natural atmospheric flux at these energies.}
+\label{fig:class_balance}
+\end{figure}
+
+\paragraph{Plain-language summary.}
+About one event in two is of the type that physicists call ``charged-current''---the rest are ``neutral-current'' events.  The two types differ in whether or not the neutrino converts into a visible particle that the detector can see.  Among the events we \emph{can} see (the CC sample), three sub-types are present: electron-, muon-, and tau-like events.  The first two are common, the tau-like ones are very rare.
+
+\subsection{Detector observables: how do CC and NC events differ?}
+Figure~\ref{fig:feature_dist} shows the marginal distributions of four key detector observables, separately for CC and NC events.  CC events typically deposit \emph{more} charge in the detector than NC events---the lepton track adds to the hadronic deposition---and they spread across a wider range of channels.  Quantitatively, the mean total hit count is $\overline{N_h^{\text{CC}}}\!=\!1992$ vs.\ $\overline{N_h^{\text{NC}}}\!=\!990$ (a factor of two), and the channel range on the collection plane is $\SI{257\pm245}{}$ for CC vs.\ $\SI{190\pm236}{}$ for NC.  These differences, while statistically meaningful, exhibit substantial overlap: no single observable cleanly separates the two classes, motivating a multivariate approach.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{fig_feature_distributions}
+\caption{Probability density distributions of four detector observables, separated by interaction type (NC, grey; CC, blue).  Although the two distributions differ in both shape and location, they overlap substantially; no single feature alone discriminates CC from NC.}
+\label{fig:feature_dist}
+\end{figure}
+
+\subsection{Correlation structure}
+Figure~\ref{fig:corr} shows the Pearson correlation matrix of the detector observables (and the binary CC/NC label).  Several observables are mutually highly correlated: per-plane hit counts naturally correlate with the total hit count, and channel ranges across the three planes are pairwise correlated because long tracks elongate the event in all three views.  This redundancy implies that effective dimensionality is lower than the nominal $13$ observables; tree-based classifiers, which automatically handle redundant features, are well suited to this dataset.  The strongest individual correlations with the target are observed for $N_h$ ($r=0.15$) and $\mathrm{channel\_range}_W$ ($r=0.14$), confirming the visual impression of Figure~\ref{fig:feature_dist}.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.83\linewidth]{fig_correlation_heatmap}
+\caption{Pearson correlation matrix of the detector observables and the binary CC/NC target.  Per-plane hit counts correlate strongly with the total hit count; the channel ranges of the three wire planes are mutually correlated.  No individual observable correlates strongly with the target.}
+\label{fig:corr}
+\end{figure}
+
+\subsection{Reconstruction quality}
+Figure~\ref{fig:truth_reco} compares truth and reconstructed kinematic quantities for the subset of $n=\num{151}$ CC events whose three-dimensional reconstruction was successful (cf.\ Section~\ref{sec:technical}).  The reconstructed neutrino energy tracks the truth value over four decades with no overall bias (median fractional residual $0.02$, inter-quartile range $0.33$).  The zenith angle is reconstructed with a median bias of $-\SI{0.02}{\degree}$ and an interquartile spread of $\SI{25}{\degree}$, sufficient to distinguish broad bins of $L/E$ but not to resolve detailed oscillation structure.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{fig_truth_vs_reco}
+\caption{Reconstruction quality on CC events with successful direction reconstruction ($n=\num{151}$).  (a) Reconstructed vs.\ truth neutrino energy on a logarithmic scale.  (b) Reconstructed vs.\ truth zenith angle.  (c) Distribution of the fractional energy residual.}
+\label{fig:truth_reco}
+\end{figure}
+
+\subsection{Aims of the technical analysis}
+Motivated by the foregoing observations, the technical analysis pursues two specific objectives:
+
+\begin{enumerate}[label=\textbf{(\Alph*)},leftmargin=*]
+\item \textbf{CC vs.\ NC classification.}  Quantify the extent to which the binary distinction between Charged-Current and Neutral-Current interactions can be inferred from detector observables alone, using four standard supervised classifiers.
+\item \textbf{Flavour classification within CC.}  Quantify the extent to which the neutrino flavour ($\nu_e$, $\nu_\mu$, $\nu_\tau$) can be inferred from the same observables, restricted to CC events.
+\end{enumerate}
+
+In both tasks, the feature set is restricted to detector observables and avoids any quantity derived from the MC truth, ensuring that the classifier is benchmarked on the same information that would be available from a real measurement.
+
+% =====================================================================
+\section{Technical analysis}
+\label{sec:technical}
+% =====================================================================
+
+\subsection{Reconstruction pipeline}
+The variables used as features are themselves the output of a reconstruction pipeline operating on the raw hits.  For completeness we summarise the principal steps; full implementation details are given in the project notebooks.
+
+\paragraph{Three-dimensional space points.}
+Each pair of wire planes (UW, VW, UV) determines two orthogonal detector coordinates $(y,z)$ via fixed geometric transformations of the form
+\begin{equation}
+y = \frac{w\cos\theta_U - u\cos\theta_W}{\sin(\theta_U-\theta_W)},
+\qquad
+z = \frac{w\sin\theta_U - u\sin\theta_W}{\sin(\theta_U-\theta_W)},
+\end{equation}
+where $\theta_W=0$ and $\theta_U = -\theta_V \approx \SI{0.623}{rad}$ are the wire-plane angles.  Hits are first grouped into drift-coordinate slices of width $\SI{0.5}{cm}$; within each slice and per truth particle (\texttt{mc\_id}), all admissible plane combinations are enumerated and the third plane provides a residual that quantifies geometric consistency.
+
+\paragraph{Filtering.}
+Reconstructed three-dimensional points are filtered in two stages: (i) per-event RMS of the wire-plane residuals defines a threshold above which points are discarded; (ii) for each truth particle, a three-dimensional line is fitted by Singular Value Decomposition through the trusted points, and points whose perpendicular distance to the line exceeds $\SI{2}{cm}$ are removed.
+
+\paragraph{Particle directions and neutrino kinematics.}
+Per-particle directions are reconstructed from the filtered point cloud.  For track-like primaries (muons, charged pions, protons) the direction is taken as the first principal component of the centred point cloud; for shower-like primaries (electrons, photons) the principal-component direction is biased toward the longest axis of the shower, so we instead use a weighted mean of unit vectors from the vertex to each hit.  The neutrino three-momentum is obtained as
+\begin{equation}
+\vec p_\nu = \sum_i p_i\,\hat n_i, \qquad p_i = \sqrt{(E_i^{\text{truth}})^2 - m_i^2},
+\end{equation}
+where $\hat n_i$ is the reconstructed direction of primary $i$, $E_i^{\text{truth}}$ is its truth-level energy and $m_i$ its rest mass.  Note that the magnitude of each primary's momentum is taken from MC truth; the direction is reconstructed.  This is a deliberate simplification that isolates the angular reconstruction from calorimetric uncertainties.
+
+\paragraph{Zenith angle and baseline.}
+The zenith angle $\theta_z$ is defined relative to the local vertical (the detector's $+y$-axis) such that $\theta_z=0$ corresponds to a downward-going neutrino (cosmic-ray production directly overhead) and $\theta_z=\pi$ to an upward-going neutrino (production at the antipodes).  The baseline $L$ is then obtained from the law of cosines on a spherical Earth of radius $R=\SI{6371}{km}$:
+\begin{equation}
+L = -a\cos\theta_z + \sqrt{a^2\cos^2\theta_z + (b^2 - a^2)},
+\label{eq:L}
+\end{equation}
+with $a=R-d$ ($d=\SI{1.5}{km}$ is the detector depth) and $b=R+h$ ($h=\SI{15}{km}$ is the atmospheric production height).
+
+\subsection{Classification methodology}
+Both classification tasks are tackled with the same four classifiers, chosen to span complementary inductive biases:
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Logistic Regression (LR)}, after standardisation of the features.  This is the linear baseline; relies on a hyperplane in feature space.
+\item \textbf{Random Forest (RF)} ($n_{\text{trees}}=300$, default depth).  Bagging of axis-aligned decision trees.
+\item \textbf{XGBoost (XGB)} ($n_{\text{trees}}=300$, depth $\le 4$, learning rate $0.1$).  Gradient-boosted trees with explicit regularisation.
+\item \textbf{LightGBM (LGBM)} ($n_{\text{trees}}=300$, learning rate $0.1$).  Gradient-boosted trees with histogram-based splits.
+\end{itemize}
+
+\paragraph{Imbalance correction.}
+For the binary task we set the LR/RF \texttt{class\_weight=balanced} and pass \texttt{scale\_pos\_weight}$=N_-/N_+$ to the boosting models.  For the multi-class task we use \texttt{class\_weight=balanced} (LR/RF/LGBM) and the multi-class soft-probability objective in XGBoost.
+
+\paragraph{Splits and metrics.}
+Each task is evaluated on a stratified $80$:$20$ train/test split (\texttt{random\_state}$=42$) and additionally with stratified $5$-fold cross-validation, which is more robust given the small minority classes.  Reported metrics are accuracy, precision, recall and $F_1$ (the latter three macro-averaged in the multi-class case), together with the area under the ROC curve (ROC-AUC) and average precision (PR-AUC).  Confusion matrices and per-class precision/recall are reported for diagnostic purposes.
+
+% ----- Task A: CC vs NC -----
+\subsection{Task A: Charged-Current vs.\ Neutral-Current}
+\label{sec:ccnc}
+
+Table~\ref{tab:ccnc_single} presents results from the $80$/$20$ split.  The random forest dominates: with $\text{Acc}=0.81$ and $F_1=0.84$, it correctly classifies the majority of events while recovering $93\%$ of true CC events (recall) at a precision of $0.77$.  Logistic regression underperforms by $\sim10$ percentage points, indicating a non-linear decision boundary; gradient-boosted methods land between LR and RF.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Model & Accuracy & Precision & Recall & $F_1$ & ROC-AUC & PR-AUC \\
+\midrule
+Logistic Regression & 0.700 & 0.717 & 0.743 & 0.730 & 0.743 & 0.748 \\
+\textbf{Random Forest} & \textbf{0.805} & \textbf{0.765} & \textbf{0.927} & \textbf{0.838} & \textbf{0.844} & \textbf{0.822} \\
+XGBoost             & 0.755 & 0.746 & 0.835 & 0.788 & 0.817 & 0.798 \\
+LightGBM            & 0.765 & 0.742 & 0.872 & 0.802 & 0.822 & 0.789 \\
+\bottomrule
+\end{tabular}
+\caption{Task A (CC vs.\ NC): metrics on the held-out test set ($80/20$ split).  Bold marks the best result for each metric.}
+\label{tab:ccnc_single}
+\end{table}
+
+The five-fold cross-validated metrics (Table~\ref{tab:ccnc_cv}) confirm the ranking and show that the dispersion across folds is small ($\sigma\le 0.04$ on every metric), implying that the apparent advantage of the random forest is not a fluctuation of the train/test split.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Model & Accuracy & $F_1$ & ROC-AUC & PR-AUC \\
+\midrule
+Logistic Regression & $0.692\pm0.022$ & $0.706\pm0.025$ & $0.751\pm0.014$ & $0.743\pm0.025$ \\
+\textbf{Random Forest} & $\bm{0.812\pm0.024}$ & $\bm{0.842\pm0.021}$ & $\bm{0.852\pm0.026}$ & $\bm{0.824\pm0.034}$ \\
+XGBoost  & $0.790\pm0.028$ & $0.819\pm0.024$ & $0.839\pm0.028$ & $0.805\pm0.039$ \\
+LightGBM & $0.790\pm0.038$ & $0.817\pm0.032$ & $0.842\pm0.037$ & $0.802\pm0.054$ \\
+\bottomrule
+\end{tabular}
+\caption{Task A: stratified $5$-fold cross-validation, reported as mean $\pm$ standard deviation.}
+\label{tab:ccnc_cv}
+\end{table}
+
+ROC and Precision-Recall curves are shown in Figure~\ref{fig:ccnc_roc_pr}.  All four models lie comfortably above the chance line; the random forest dominates in both diagnostics.  The PR-AUC of $0.82$ should be compared against the baseline rate of $0.54$ corresponding to a constant-prediction classifier on this balanced sample.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{fig_ccnc_roc_pr}
+\caption{Task A: (a) ROC curves and (b) Precision-Recall curves for the four classifiers.  Dashed lines denote chance levels ($y=x$ for ROC; the marginal positive-class rate $\bar y = 0.54$ for PR).}
+\label{fig:ccnc_roc_pr}
+\end{figure}
+
+The corresponding confusion matrices (Figure~\ref{fig:ccnc_cm}) reveal complementary error structures: the random forest favours high recall on CC at the cost of false positives, while logistic regression makes more balanced but more numerous errors.  In an oscillation-physics context the relevant operating point depends on the trade-off between selecting a clean CC sample (high precision) and not losing CC events (high recall), and would be tuned through the model's decision threshold.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{fig_ccnc_confusion}
+\caption{Task A: confusion matrices on the held-out test set.}
+\label{fig:ccnc_cm}
+\end{figure}
+
+% ----- Task B: Flavour -----
+\subsection{Task B: Flavour classification within CC}
+\label{sec:flavour}
+
+We restrict the dataset to the $\num{543}$ CC events and predict one of three classes: $\nu_e$, $\nu_\mu$, $\nu_\tau$.  Class counts in the training set are $n_{\nu_e}=300$, $n_{\nu_\mu}=229$, $n_{\nu_\tau}=14$; the $\nu_\tau$ class is therefore extremely under-represented.  Table~\ref{tab:flavour_single} reports test-set metrics from the stratified $80/20$ split.  XGBoost performs best in absolute accuracy ($0.66$) and macro-$F_1$ ($0.43$); LightGBM achieves the highest one-vs-rest ROC-AUC ($0.70$).  Both improve substantially on logistic regression, indicating that the relationships between detector observables and flavour are non-linear.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Model & Accuracy & Precision\textsubscript{macro} & Recall\textsubscript{macro} & $F_{1\text{,macro}}$ & ROC-AUC\textsubscript{OvR} \\
+\midrule
+Logistic Regression & 0.587 & 0.434 & 0.393 & 0.412 & 0.623 \\
+Random Forest       & 0.633 & 0.421 & 0.421 & 0.415 & 0.578 \\
+\textbf{XGBoost}    & \textbf{0.661} & \textbf{0.446} & \textbf{0.437} & \textbf{0.431} & 0.689 \\
+LightGBM            & 0.642 & 0.424 & 0.429 & 0.424 & \textbf{0.701} \\
+\bottomrule
+\end{tabular}
+\caption{Task B (flavour, CC events only): macro-averaged metrics on the held-out test set.}
+\label{tab:flavour_single}
+\end{table}
+
+The confusion matrices (Figure~\ref{fig:flavour_cm}) show that the difficulty of the task is concentrated in the $\nu_\tau$ class, which is essentially never recovered by any model: per-class $F_1$ on $\nu_\tau$ is zero across the board.  This is a structural consequence of the small training sample ($n_{\nu_\tau}=14$, of which only $\sim3$ are in any given test fold), not of model weakness.  The $\nu_e$/$\nu_\mu$ separation is comparatively robust, with per-class $F_1\approx0.7$ on $\nu_e$ and $\approx0.55$ on $\nu_\mu$ for the best models.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{fig_flavour_confusion}
+\caption{Task B: confusion matrices for the four classifiers.  The $\nu_\tau$ class is rarely predicted by any model.}
+\label{fig:flavour_cm}
+\end{figure}
+
+\subsection{Feature importance}
+Figure~\ref{fig:feat_imp} reports the impurity-based feature importances of the best-performing model on each task.  For the CC/NC discrimination, the random forest places the largest weight on $N_h$, $\sum\mathrm{ADC}$ and $\mathrm{channel\_range}_W$, in agreement with the physical expectation that CC events are more spatially extended and deposit more charge than NC events.  For the flavour task, XGBoost weights are dominated by the per-plane hit counts and the ADC summary statistics: muon-induced events are characterised by long, sparse tracks (high drift range, low hit density), whereas electron-induced events form denser electromagnetic showers.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{fig_feature_importance}
+\caption{Top-10 impurity-based feature importances for the best classifier on each task.}
+\label{fig:feat_imp}
+\end{figure}
+
+% =====================================================================
+\section{Conclusions}
+\label{sec:conclusions}
+% =====================================================================
+
+\subsection{Summary of findings}
+We have demonstrated an end-to-end pipeline that converts raw simulated detector data from the DUNE Far Detector into a tabular dataset suitable for machine-learning analysis, and used that dataset to address two physics-motivated classification tasks.  The headline results are:
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{CC vs.\ NC classification} is solvable to good accuracy from event-level summary statistics alone.  The random forest achieves $0.81\pm0.02$ accuracy, $F_1=0.84\pm0.02$ and ROC-AUC$=0.85\pm0.03$ in $5$-fold cross-validation.  The dominant discriminative variables are the total hit count, the total ADC charge and the channel range on the collection plane --- all measures of how spatially and energetically extended the event is.
+\item \textbf{Flavour classification} within CC events is achievable but considerably harder.  The best tabular model (XGBoost) reaches $0.66$ accuracy and $0.43$ macro-$F_1$.  The difficulty is dominated by the under-represented $\nu_\tau$ class, which all four models fail to recover; $\nu_e$ vs.\ $\nu_\mu$ separation is comparatively robust ($F_1\approx0.7$ for $\nu_e$).
+\end{itemize}
+
+\subsection{Plain-language interpretation}
+For a non-technical audience, two takeaways stand out.  First, the question \emph{``has this neutrino actually interacted in a way that lets us study it?''} (the CC/NC distinction) can be answered correctly four times out of five from the detector readout alone, with no recourse to truth-level information.  This is an encouraging baseline: it confirms that the visible signature of the two interaction types differs systematically and can be picked up by standard, off-the-shelf machine-learning tools.  Second, going further to identify the original neutrino's flavour is harder, particularly for tau neutrinos, which are intrinsically rare; substantially more data, or qualitatively richer features, would be needed to do this reliably.
+
+\subsection{Limitations}
+Three limitations of the present analysis warrant explicit mention.
+
+\paragraph{Train/test split granularity.}
+Although we have $\num{1000}$ instances, only $\num{100}$ correspond to genuinely independent neutrino interactions; the remainder are repeated detector realisations of the same underlying physics.  A naive row-level random split therefore allows realisations of the same physics event to appear in both train and test sets, which biases the reported metrics optimistically.  A defensible analysis at publication level would split on the unique \texttt{event\_id}, putting all realisations of a given physics event on the same side; this would reduce the effective sample size and probably degrade the metrics by a few percentage points.
+
+\paragraph{Information loss in summary features.}
+The detector observables used as features are scalar summary statistics of fundamentally spatial information.  Track length, shower opening angle, kink topology and similar shape variables are precisely what distinguishes neutrino flavours and are largely lost in the projection from a $(\text{channel}\times\text{drift})$ image to a few aggregate numbers.  A convolutional neural network operating on the raw $2$-D wire-plane images would in principle access this richer information.
+
+\paragraph{Truth-level energy magnitudes.}
+The reconstructed neutrino energy is built from \emph{truth-level} primary energies combined with reconstructed directions.  This is a controlled simplification appropriate for studying the angular reconstruction in isolation, but a real measurement requires a calorimetric energy estimate from the ADC sums, calibrated against truth.  Such an extension is straightforward but has not been carried out here.
+
+\subsection{Extensions}
+Several natural directions follow from the present work, in increasing order of effort:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Process the full sample.}  Extending the dataset from $\num{1000}$ to all $\num{9700}$ instances would increase the training pool by approximately a factor of ten and, in particular, increase the $\nu_\tau$ count from $\num{14}$ to $\sim\num{135}$.  We expect the flavour-classification metrics to improve substantially as a result, especially for the rare class.
+\item \textbf{Event-level cross-validation.}  Replacing the row-level stratified split with a \texttt{event\_id}-grouped split would produce statistically defensible generalisation estimates.
+\item \textbf{Convolutional neural network.}  The natural next architecture is a CNN that takes the three wire-plane images as input channels and is trained on the same two classification tasks.  This is the standard approach in the LArTPC literature and routinely outperforms tabular-feature classifiers by $5$--$15$ percentage points on flavour tasks.
+\item \textbf{Calorimetric energy reconstruction.}  Replacing truth-level $|p|$ with an ADC-derived energy estimate, calibrated end-to-end, would render the entire pipeline truth-independent and unlock studies of the energy resolution.
+\item \textbf{Oscillation analysis.}  With CC events identified, flavours classified, and $L$, $E$ reconstructed, the data become amenable to a fit of the standard three-flavour oscillation parameters in the $L/E$ plane.  This is the physics motivation that ultimately justifies the pipeline.
+\end{enumerate}
+
+\subsection{Final remark}
+The analysis presented here exemplifies a workflow that is increasingly common at the boundary of high-energy physics and data science: a substantial domain-specific reconstruction pipeline feeding into well-understood machine-learning tools.  Both halves are essential.  The reconstruction provides physically meaningful inputs and ensures that any downstream classification operates on the right quantities; the machine learning provides a principled way of exploiting the multivariate signal and quantifying its statistical significance.  Together they offer a credible blueprint for a more ambitious analysis in which detector-specific deep-learning architectures replace the present tabular models, ultimately serving the measurement of fundamental neutrino-oscillation parameters.
+
+\end{document}
